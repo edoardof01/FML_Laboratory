@@ -1,0 +1,18 @@
+{
+  "best_threshold": 0.39591836734693875,
+  "subset_accuracy": 0.46729316381057673,
+  "f1_micro": 0.6155899207159118,
+  "f1_macro": 0.4850404190388594,
+  "f1_weighted": 0.6033406933027244,
+  "precision_micro": 0.6117004680187208,
+  "recall_micro": 0.6195291515247274,
+  "ensemble_mode": "soft",
+  "num_models": 5,
+  "models_used": [
+    "Baseline",
+    "K-Fold",
+    "Weighted",
+    "MLM",
+    "Partial Freezing"
+  ]
+}

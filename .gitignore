@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Models and Training Outputs (large files - excluded from git)
+outputs/
+kfold_model_go-emotions/
+layer_analysis_go-emotions/
+
+# Keep only metrics and configurations (small JSON files)
+!outputs/**/metrics.json
+!outputs/**/training_summary.json
+!outputs/**/config.json
+!kfold_model_go-emotions/*.json
+!layer_analysis_go-emotions/*.json
+
+# Exclude all model weights
+*.safetensors
+*.bin
+*.pth
+*.pt
+*.ckpt
+*.h5
+
+# Logs
+*.log
+**/logs*/
+**/runs/
+**/tensorboard/
+
+# Data (if large)
+# Uncomment if you don't want to push data
+# data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results that can be regenerated
+*.png
+*.jpg
+*.pdf
+statistical_analysis_go-emotions/*.png
+model_comparison_go-emotions/*.png
+
+# Temporary files
+*.tmp
+*.bak

@@ -1,0 +1,8 @@
+,Baseline,K-Fold,Weighted,MLM,Partial Freezing,Contrastive (SupCon),Clean Baseline
+Baseline,-,p=0.0000 ***,p=0.0000 ***,p=0.0000 ***,p=0.0000 ***,p=0.2417 ns,p=0.3103 ns
+K-Fold,-,-,p=0.0000 ***,p=0.4680 ns,p=0.6162 ns,p=0.0000 ***,p=0.0000 ***
+Weighted,-,-,-,p=0.0000 ***,p=0.0000 ***,p=0.0000 ***,p=0.0000 ***
+MLM,-,-,-,-,p=0.2077 ns,p=0.0000 ***,p=0.0000 ***
+Partial Freezing,-,-,-,-,-,p=0.0000 ***,p=0.0000 ***
+Contrastive (SupCon),-,-,-,-,-,-,p=0.9316 ns
+Clean Baseline,-,-,-,-,-,-,-
