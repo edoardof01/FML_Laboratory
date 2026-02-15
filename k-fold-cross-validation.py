@@ -195,27 +195,37 @@ def model_init(trial=None):
 # 8. LOAD BEST HYPERPARAMETERS
 # ============================================================
 print("\n--- Loading Best Hyperparameters ---")
-best_hp_filepath = f"./optuna_model_{DATASET_CONFIG['name'].replace('_', '-')}/best_hyperparameters.json"
+
+# Search in multiple candidate locations (baseline output dir first)
+TRAIN_CONFIG = config.get("training", {})
+BASELINE_OUTPUT_DIR = config.get("output_dir", "./outputs/go-emotions")
+hp_search_paths = [
+    os.path.join(BASELINE_OUTPUT_DIR, "best_hyperparameters.json"),
+    f"./optuna_model_{DATASET_CONFIG['name'].replace('_', '-')}/best_hyperparameters.json",
+]
 
 best_hyperparameters = {
-    'learning_rate': 2e-5,
-    'per_device_train_batch_size': 16,
-    'num_train_epochs': 3
+    'learning_rate': float(TRAIN_CONFIG.get('learning_rate', 2e-5)),
+    'per_device_train_batch_size': TRAIN_CONFIG.get('per_device_train_batch_size', 16),
+    'num_train_epochs': TRAIN_CONFIG.get('num_train_epochs', 3),
 }
 
-if os.path.exists(best_hp_filepath):
-    try:
-        with open(best_hp_filepath, 'r') as f:
-            best_hyperparameters = json.load(f)
-        print(f"✓ Hyperparameters loaded from: {best_hp_filepath}")
-        print(f"  {best_hyperparameters}")
-    except Exception as e:
-        print(f"✗ Error loading hyperparameters: {e}")
-        print(f"  Using fallback values")
-else:
-    print(f"✗ File not found: {best_hp_filepath}")
-    print(f"  Make sure you ran fine_tune.py first!")
-    print(f"  Using fallback values")
+hp_loaded = False
+for hp_path in hp_search_paths:
+    if os.path.exists(hp_path):
+        try:
+            with open(hp_path, 'r') as f:
+                best_hyperparameters = json.load(f)
+            print(f"✓ Hyperparameters loaded from: {hp_path}")
+            print(f"  {best_hyperparameters}")
+            hp_loaded = True
+            break
+        except Exception as e:
+            print(f"✗ Error loading {hp_path}: {e}")
+
+if not hp_loaded:
+    print(f"✗ No hyperparameter file found in: {hp_search_paths}")
+    print(f"  Using config defaults: {best_hyperparameters}")
 
 
 # ============================================================
@@ -232,13 +242,16 @@ else:
 # ============================================================
 # 10. TRAINING ARGUMENTS
 # ============================================================
+weight_decay = TRAIN_CONFIG.get('weight_decay', 0.01)
+seed = TRAIN_CONFIG.get('seed', 42)
+
 training_args_kfold = TrainingArguments(
     output_dir=os.path.join(OUTPUT_DIR, "kfold_results"),
     learning_rate=best_hyperparameters.get('learning_rate', 2e-5),
     per_device_train_batch_size=best_hyperparameters.get('per_device_train_batch_size', 16),
     per_device_eval_batch_size=best_hyperparameters.get('per_device_train_batch_size', 16),
     num_train_epochs=best_hyperparameters.get('num_train_epochs', 3),
-    weight_decay=0.01,
+    weight_decay=weight_decay,
     eval_strategy=IntervalStrategy.EPOCH,
     save_strategy=IntervalStrategy.EPOCH,
     load_best_model_at_end=True,
@@ -246,19 +259,7 @@ training_args_kfold = TrainingArguments(
     logging_dir=os.path.join(OUTPUT_DIR, "kfold_logs"),
     logging_steps=100,
     report_to="tensorboard",
-)
-
-training_args_final_model = TrainingArguments(
-    output_dir=os.path.join(OUTPUT_DIR, "final_model_results"),
-    learning_rate=best_hyperparameters.get('learning_rate', 2e-5),
-    per_device_train_batch_size=best_hyperparameters.get('per_device_train_batch_size', 16),
-    per_device_eval_batch_size=best_hyperparameters.get('per_device_train_batch_size', 16),
-    num_train_epochs=best_hyperparameters.get('num_train_epochs', 3),
-    weight_decay=0.01,
-    eval_strategy="no",
-    logging_dir=os.path.join(OUTPUT_DIR, "final_model_logs"),
-    logging_steps=100,
-    report_to="tensorboard",
+    seed=seed,
 )
 
 
@@ -329,22 +330,56 @@ print(f"✓ K-Fold metrics saved to: {kfold_metrics_path}")
 
 
 # ============================================================
-# 13. FINAL MODEL TRAINING ON FULL TRAIN+VAL SET
+# 13. FINAL MODEL TRAINING ON ORIGINAL TRAIN SET WITH VALIDATION
 # ============================================================
-print("\n--- Training Final Model on Full Train+Val Set ---")
+print("\n--- Training Final Model (train split + validation for early stopping) ---")
+
+# Use the original train/validation split (same as Baseline) for fair comparison:
+# - Train on the train split
+# - Use validation split for early stopping & best checkpoint selection
+tokenized_train_dataset = dataset[DATASET_CONFIG["split_names"]["train"]].map(tokenize_function, batched=True)
+tokenized_val_dataset = dataset[DATASET_CONFIG["split_names"]["validation"]].map(tokenize_function, batched=True)
+
+# Clean columns
+for ds_name, ds in [("train", tokenized_train_dataset), ("val", tokenized_val_dataset)]:
+    cols_remove = [c for c in ds.column_names if c not in ['input_ids', 'attention_mask', 'labels']]
+    if ds_name == "train":
+        tokenized_train_dataset = ds.remove_columns(cols_remove)
+        tokenized_train_dataset.set_format("torch")
+    else:
+        tokenized_val_dataset = ds.remove_columns(cols_remove)
+        tokenized_val_dataset.set_format("torch")
+
+training_args_final_model = TrainingArguments(
+    output_dir=os.path.join(OUTPUT_DIR, "final_model_results"),
+    learning_rate=best_hyperparameters.get('learning_rate', 2e-5),
+    per_device_train_batch_size=best_hyperparameters.get('per_device_train_batch_size', 16),
+    per_device_eval_batch_size=best_hyperparameters.get('per_device_train_batch_size', 16),
+    num_train_epochs=best_hyperparameters.get('num_train_epochs', 3),
+    weight_decay=weight_decay,
+    eval_strategy="epoch",
+    save_strategy="epoch",
+    load_best_model_at_end=True,
+    metric_for_best_model="f1_weighted",
+    save_total_limit=2,
+    logging_dir=os.path.join(OUTPUT_DIR, "final_model_logs"),
+    logging_steps=100,
+    report_to="tensorboard",
+    seed=seed,
+)
 
 final_model_trainer = Trainer(
     model_init=model_init,
     args=training_args_final_model,
-    train_dataset=tokenized_full_train_validation_dataset,
-    eval_dataset=None,
+    train_dataset=tokenized_train_dataset,
+    eval_dataset=tokenized_val_dataset,
     processing_class=tokenizer,
     data_collator=data_collator,
     compute_metrics=compute_metrics,
 )
 
 final_model_trainer.train()
-print("✓ Final training complete")
+print("✓ Final training complete (best checkpoint selected via validation)")
 
 
 # ============================================================

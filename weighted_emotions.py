@@ -74,35 +74,46 @@ if not isinstance(train_labels, torch.Tensor):
 counts = train_labels.sum(dim=0)
 total_examples = len(train_labels)
 
-pos_weight = []
+# Compute raw pos_weight: ratio of negatives to positives per class
+# For rare classes this can be extremely high (e.g. 800+)
+raw_pos_weight = []
 for c in counts:
     neg = total_examples - c.item()
     if c == 0:
         pw = 1.0
     else:
         pw = float(neg) / float(c)
-    pos_weight.append(pw)
-pos_weight = torch.tensor(pos_weight, dtype=torch.float)
+    raw_pos_weight.append(pw)
+raw_pos_weight = torch.tensor(raw_pos_weight, dtype=torch.float)
 
-# CRITICAL FIX: Clip extreme pos_weight values to prevent overprediction
-# Without clipping, rare classes can have weights of 800+ which causes
-# the model to predict positive for almost everything
-MAX_POS_WEIGHT = 10.0
-pos_weight_before_clip = pos_weight.clone()
-pos_weight = torch.clamp(pos_weight, min=0.1, max=MAX_POS_WEIGHT)
+print(f"  Raw pos_weight range: [{raw_pos_weight.min():.2f}, {raw_pos_weight.max():.2f}]")
 
-# Log statistics about weight clipping
-num_clipped = (pos_weight_before_clip > MAX_POS_WEIGHT).sum().item()
-if num_clipped > 0:
-    print(f"  ⚠ Clipped {num_clipped} pos_weight values (max was {pos_weight_before_clip.max():.1f}, now capped at {MAX_POS_WEIGHT})")
 
-# Save counts
+def apply_softening(raw_weights: torch.Tensor, exponent: float) -> torch.Tensor:
+    """
+    Weighted Softening: attenuates extreme class weights.
+    
+    Given raw weights w_c = neg_c / pos_c, applies:
+        w̃_c = w_c^s    where s ∈ [0, 1]
+    
+    - s = 1.0: full class-weighting (no attenuation)
+    - s = 0.5: square-root softening (moderate)
+    - s = 0.0: all weights become 1.0 (no weighting)
+    
+    This avoids hard clipping and provides a smooth, 
+    learnable trade-off between ignoring class imbalance 
+    and over-correcting for rare classes.
+    """
+    return torch.pow(raw_weights, exponent)
+
+
+# Save counts and distribution
 label_counts_dict = {label_names[i]: int(counts[i].item()) for i in range(len(counts))}
 with open(os.path.join(OUTPUT_DIR, "label_counts.json"), "w") as f:
-    json.dump({"label_names": label_names, "counts": label_counts_dict, "pos_weight": pos_weight.tolist()}, f, indent=2)
+    json.dump({"label_names": label_names, "counts": label_counts_dict,
+               "raw_pos_weight": raw_pos_weight.tolist()}, f, indent=2)
 
-print("Label counts saved and pos_weight computed.")
-print(f"  Sample pos_weights: {pos_weight[:5].tolist()}")
+print("Label counts saved and raw pos_weight computed.")
 plot_label_distribution(label_counts_dict, OUTPUT_DIR)
 
 
@@ -132,7 +143,11 @@ def optuna_objective(trial):
         "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32]),
         "num_train_epochs": trial.suggest_int("num_train_epochs", 2, 4),
         "weight_decay": trial.suggest_float("weight_decay", 0.0, 0.1),
+        "softening_exponent": trial.suggest_float("softening_exponent", 0.1, 1.0),
     }
+    
+    # Apply weighted softening with trial's exponent
+    trial_pos_weight = apply_softening(raw_pos_weight, hp["softening_exponent"])
     
     training_args = TrainingArguments(
         output_dir=f"{OUTPUT_DIR}/optuna_trial_{trial.number}",
@@ -158,7 +173,7 @@ def optuna_objective(trial):
         tokenizer=tokenizer,
         data_collator=MultiLabelDataCollator(tokenizer=tokenizer, max_length=MODEL_CONFIG.get("max_length", 128)),
         compute_metrics=compute_metrics_wrapper,
-        pos_weight=pos_weight,
+        pos_weight=trial_pos_weight,
     )
 
     trainer.train()
@@ -184,12 +199,30 @@ else:
         "learning_rate": TRAIN_CONFIG["learning_rate"],
         "per_device_train_batch_size": TRAIN_CONFIG["per_device_train_batch_size"],
         "num_train_epochs": TRAIN_CONFIG["num_train_epochs"],
-        "weight_decay": TRAIN_CONFIG["weight_decay"]
+        "weight_decay": TRAIN_CONFIG["weight_decay"],
+        "softening_exponent": 0.5  # default: square-root softening
     }
 
 # ============================================================
-# 7. FINAL TRAINING
+# 7. APPLY BEST SOFTENING & FINAL TRAINING
 # ============================================================
+best_softening = best_hp.get("softening_exponent", 0.5)
+pos_weight = apply_softening(raw_pos_weight, best_softening)
+
+print(f"\n--- Weighted Softening ---")
+print(f"  Softening exponent (s): {best_softening:.4f}")
+print(f"  Softened pos_weight range: [{pos_weight.min():.2f}, {pos_weight.max():.2f}]")
+print(f"  Sample softened pos_weights: {pos_weight[:5].tolist()}")
+
+# Save final weights info
+with open(os.path.join(OUTPUT_DIR, "softening_info.json"), "w") as f:
+    json.dump({
+        "softening_exponent": best_softening,
+        "raw_pos_weight_range": [float(raw_pos_weight.min()), float(raw_pos_weight.max())],
+        "softened_pos_weight_range": [float(pos_weight.min()), float(pos_weight.max())],
+        "softened_pos_weight": pos_weight.tolist()
+    }, f, indent=2)
+
 training_args = TrainingArguments(
     output_dir=os.path.join(OUTPUT_DIR, "final_results"),
     learning_rate=best_hp.get("learning_rate", TRAIN_CONFIG["learning_rate"]),

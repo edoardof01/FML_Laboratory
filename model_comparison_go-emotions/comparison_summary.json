@@ -3,11 +3,11 @@
   "num_models_compared": 8,
   "models": [
     "Ensemble",
+    "Weighted Classes",
     "Clean Baseline",
     "Baseline (Fine-tune)",
-    "Weighted Classes",
-    "Contrastive (SupCon)",
     "K-Fold CV",
+    "Contrastive (SupCon)",
     "MLM Pretraining",
     "Partial Freezing"
   ],
@@ -21,11 +21,11 @@
   "best_per_metric": {
     "F1 Weighted": {
       "model": "Ensemble",
-      "score": 0.6033406933027244
+      "score": 0.6048872296698561
     },
     "F1 Micro": {
       "model": "Ensemble",
-      "score": 0.6155899207159118
+      "score": 0.6136926889714994
     },
     "Accuracy": {
       "model": "Clean Baseline",
@@ -36,20 +36,29 @@
       "score": 0.7112893230720376
     },
     "Recall": {
-      "model": "Weighted Classes",
-      "score": 0.7446674040132722
+      "model": "Ensemble",
+      "score": 0.6260072681308263
     }
   },
   "overall_best": "Ensemble",
   "comparison_table": [
     {
       "Model": "Ensemble",
-      "F1 Weighted": 0.6033406933027244,
-      "F1 Micro": 0.6155899207159118,
-      "Accuracy": 0.46729316381057673,
-      "Precision": 0.6117004680187208,
-      "Recall": 0.6195291515247274,
-      "Avg Rank": 2.8
+      "F1 Weighted": 0.6048872296698561,
+      "F1 Micro": 0.6136926889714994,
+      "Accuracy": 0.4623180394324673,
+      "Precision": 0.60185325839283,
+      "Recall": 0.6260072681308263,
+      "Avg Rank": 3.0
+    },
+    {
+      "Model": "Weighted Classes",
+      "F1 Weighted": 0.5845669974984139,
+      "F1 Micro": 0.5857637552904963,
+      "Accuracy": 0.4304403906393956,
+      "Precision": 0.5748873441148014,
+      "Recall": 0.6013588244588403,
+      "Avg Rank": 5.0
     },
     {
       "Model": "Clean Baseline",
@@ -58,7 +67,7 @@
       "Accuracy": 0.5058043117744611,
       "Precision": 0.631463651471153,
       "Recall": 0.561858113446042,
-      "Avg Rank": 2.8
+      "Avg Rank": 3.0
     },
     {
       "Model": "Baseline (Fine-tune)",
@@ -67,16 +76,16 @@
       "Accuracy": 0.47392666298138936,
       "Precision": 0.6413996886940794,
       "Recall": 0.5305735503239059,
-      "Avg Rank": 3.4
+      "Avg Rank": 3.8
     },
     {
-      "Model": "Weighted Classes",
-      "F1 Weighted": 0.5732389145814675,
-      "F1 Micro": 0.5470373164645116,
-      "Accuracy": 0.27234199373502854,
-      "Precision": 0.4805292457979894,
-      "Recall": 0.7446674040132722,
-      "Avg Rank": 5.8
+      "Model": "K-Fold CV",
+      "F1 Weighted": 0.5732645773347016,
+      "F1 Micro": 0.5887294364718236,
+      "Accuracy": 0.47318960751796574,
+      "Precision": 0.6388570731094195,
+      "Recall": 0.531521567388213,
+      "Avg Rank": 4.0
     },
     {
       "Model": "Contrastive (SupCon)",
@@ -85,16 +94,7 @@
       "Accuracy": 0.46434494195688225,
       "Precision": 0.6544469919200281,
       "Recall": 0.5038710696792542,
-      "Avg Rank": 4.6
-    },
-    {
-      "Model": "K-Fold CV",
-      "F1 Weighted": 0.5515623887029147,
-      "F1 Micro": 0.5818965517241379,
-      "Accuracy": 0.462870831030035,
-      "Precision": 0.6900950381956548,
-      "Recall": 0.490598830778954,
-      "Avg Rank": 4.8
+      "Avg Rank": 5.0
     },
     {
       "Model": "MLM Pretraining",
@@ -103,7 +103,7 @@
       "Accuracy": 0.45439469320066334,
       "Precision": 0.7017485376098529,
       "Recall": 0.47859061463106334,
-      "Avg Rank": 5.6
+      "Avg Rank": 5.8
     },
     {
       "Model": "Partial Freezing",
@@ -112,7 +112,7 @@
       "Accuracy": 0.4490510410908421,
       "Precision": 0.7112893230720376,
       "Recall": 0.4691104439879918,
-      "Avg Rank": 6.2
+      "Avg Rank": 6.4
     }
   ]
 }

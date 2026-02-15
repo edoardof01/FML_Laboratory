@@ -49,7 +49,7 @@ class SupConLoss(nn.Module):
                 labels = labels.float()
                 
                 if self.use_jaccard:
-                    # Use Jaccard similarity: |A ∩ B| / |A ∪ B|
+                    # Use Jaccard similarity
                     intersection = torch.mm(labels, labels.T)  # [bsz, bsz]
                     sum_labels = labels.sum(1, keepdim=True)  # [bsz, 1]
                     union = sum_labels + sum_labels.T - intersection  # [bsz, bsz]

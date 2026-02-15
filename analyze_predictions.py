@@ -3,7 +3,6 @@
 Analyze model predictions to understand prediction patterns.
 Specifically checks if models are predicting mostly zeros.
 """
-#analyze_predictions.py
 import os
 import json
 import numpy as np
