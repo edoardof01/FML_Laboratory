@@ -22,23 +22,18 @@ import json
 import numpy as np
 import torch
 from pathlib import Path
-from datetime import datetime
 from datasets import load_dataset, concatenate_datasets
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
     TrainingArguments,
     Trainer,
-    DataCollatorWithPadding
 )
 from sklearn.model_selection import KFold
-from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
-from dataclasses import dataclass
-from typing import Any, Dict, List, Union
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent / "src"))
-from improved_metrics import comprehensive_metrics, print_metrics_summary
+from src.metrics import comprehensive_metrics, print_metrics_summary
 
 # =============================================================================
 # CONFIGURATION
@@ -71,45 +66,13 @@ MODELS_TO_TRAIN = ["baseline", "kfold", "weighted", "partial_freezing"]
 
 
 # =============================================================================
-# DATA COLLATOR FOR MULTI-LABEL
+# SHARED UTILITIES (from src/)
 # =============================================================================
-@dataclass
-class MultiLabelDataCollator:
-    """Data collator that handles multi-label classification."""
-    tokenizer: Any
-    padding: Union[bool, str] = True
-    
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        labels = [feature.pop("labels") for feature in features] if "labels" in features[0] else None
-        batch = self.tokenizer.pad(features, padding=self.padding, return_tensors="pt")
-        
-        if labels is not None:
-            if isinstance(labels[0], torch.Tensor):
-                batch["labels"] = torch.stack(labels).float()
-            elif isinstance(labels[0], list):
-                batch["labels"] = torch.tensor(labels, dtype=torch.float)
-            else:
-                batch["labels"] = torch.tensor(labels, dtype=torch.long)
-        return batch
+from src.train_utils import MultiLabelDataCollator, get_data_collator, set_seed
+from src.metrics import make_compute_metrics
 
-
-# =============================================================================
-# METRICS
-# =============================================================================
-def compute_metrics(eval_pred):
-    """Compute metrics for multi-label classification."""
-    logits, labels = eval_pred
-    predictions = (torch.sigmoid(torch.tensor(logits)) > 0.5).int().numpy()
-    labels = labels.astype(int)
-    
-    return {
-        "accuracy": float(accuracy_score(labels, predictions)),
-        "f1_weighted": float(f1_score(labels, predictions, average="weighted", zero_division=0)),
-        "f1_micro": float(f1_score(labels, predictions, average="micro", zero_division=0)),
-        "f1_macro": float(f1_score(labels, predictions, average="macro", zero_division=0)),
-        "precision_weighted": float(precision_score(labels, predictions, average="weighted", zero_division=0)),
-        "recall_weighted": float(recall_score(labels, predictions, average="weighted", zero_division=0)),
-    }
+# Trainer-compatible metrics wrapper (multi-label)
+compute_metrics = make_compute_metrics(is_multilabel=True)
 
 
 # =============================================================================

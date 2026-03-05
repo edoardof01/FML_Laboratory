@@ -22,7 +22,7 @@ from pathlib import Path
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent / "src"))
-from improved_metrics import comprehensive_metrics, print_metrics_summary
+from src.metrics import comprehensive_metrics, print_metrics_summary
 
 # Configuration
 DATASET_CONFIG = {

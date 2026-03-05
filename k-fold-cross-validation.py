@@ -1,39 +1,29 @@
 # k-fold-cross-validation.py
-import torch
+"""
+K-Fold Cross-Validation
+========================
+Evaluates model stability via K-Fold CV, then trains a final model
+on the original train split for fair comparison.
+"""
+import os
+import json
+
 import numpy as np
+import torch
 from datasets import concatenate_datasets
 from transformers import (
-    AutoTokenizer, 
-    AutoModelForSequenceClassification, 
-    TrainingArguments, 
-    Trainer, 
+    TrainingArguments,
+    Trainer,
     IntervalStrategy,
-    DataCollatorWithPadding
 )
 from sklearn.model_selection import KFold
-import json
-import os
-from sklearn.metrics import (
-    classification_report, 
-    confusion_matrix, 
-    ConfusionMatrixDisplay,
-    accuracy_score,
-    f1_score,
-    precision_score,
-    recall_score
-)
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-import pandas as pd
-from dataclasses import dataclass
-from typing import Any, Dict, List, Union
-from torch.utils.data import DataLoader
 
-# Import src utils to support cleaned dataset loading
 from src.config_utils import get_config
 from src.data_utils import load_and_preprocess_dataset, tokenize_dataset
+from src.metrics import make_compute_metrics
+from src.model_utils import get_model
+from src.train_utils import get_data_collator, set_seed, evaluate_and_save
+from src.viz_utils import visualize_embeddings
 
 
 # ============================================================
@@ -76,119 +66,57 @@ print(f"  Test: {len(test_dataset)} samples")
 
 
 # ============================================================
-# 2. TOKENIZATION (USING CENTRALIZED TOKENIZER)
+# 2. TOKENIZATION
 # ============================================================
-print("\n--- Tokenizing Dataset ---")
+tokenized_full, tokenizer = tokenize_dataset(
+    full_train_validation_dataset,
+    text_column=DATASET_CONFIG["text_column"],
+    model_name=MODEL_CONFIG["name"],
+    max_length=MODEL_CONFIG.get("max_length", 128),
+)
+# tokenize_dataset wraps a DatasetDict; we combined into a single Dataset,
+# so we do it manually for the combined and test sets.
+from transformers import AutoTokenizer
 tokenizer = AutoTokenizer.from_pretrained(MODEL_CONFIG["name"])
 
 def tokenize_function(examples):
-    return tokenizer(examples[DATASET_CONFIG["text_column"]], 
-                     truncation=True, 
-                     max_length=MODEL_CONFIG.get("max_length", 128))
+    return tokenizer(
+        examples[DATASET_CONFIG["text_column"]],
+        truncation=True,
+        max_length=MODEL_CONFIG.get("max_length", 128),
+    )
 
 tokenized_full_train_validation_dataset = full_train_validation_dataset.map(tokenize_function, batched=True)
 tokenized_test_dataset = test_dataset.map(tokenize_function, batched=True)
 
-# Remove ALL columns except input_ids, attention_mask, and labels
-columns_to_remove = [col for col in tokenized_full_train_validation_dataset.column_names 
-                     if col not in ['input_ids', 'attention_mask', 'labels']]
-tokenized_full_train_validation_dataset = tokenized_full_train_validation_dataset.remove_columns(columns_to_remove)
+for ds_ref in (tokenized_full_train_validation_dataset, tokenized_test_dataset):
+    cols_rm = [c for c in ds_ref.column_names if c not in ("input_ids", "attention_mask", "labels")]
+    ds_ref = ds_ref.remove_columns(cols_rm)
 
-columns_to_remove = [col for col in tokenized_test_dataset.column_names 
-                     if col not in ['input_ids', 'attention_mask', 'labels']]
-tokenized_test_dataset = tokenized_test_dataset.remove_columns(columns_to_remove)
-
+# re-assign after column removal (map returns new objects)
+tokenized_full_train_validation_dataset = tokenized_full_train_validation_dataset.remove_columns(
+    [c for c in tokenized_full_train_validation_dataset.column_names if c not in ("input_ids", "attention_mask", "labels")]
+)
+tokenized_test_dataset = tokenized_test_dataset.remove_columns(
+    [c for c in tokenized_test_dataset.column_names if c not in ("input_ids", "attention_mask", "labels")]
+)
 tokenized_full_train_validation_dataset.set_format("torch")
 tokenized_test_dataset.set_format("torch")
 print("✓ Tokenization complete")
 
-
 # ============================================================
-# 5. CUSTOM DATA COLLATOR FOR MULTI-LABEL
+# 3. COLLATOR, METRICS, MODEL INIT (centralised)
 # ============================================================
-@dataclass
-class MultiLabelDataCollator:
-    """Data collator for multi-label and single-label classification"""
-    tokenizer: Any
-    padding: Union[bool, str] = True
-    
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        labels = [feature.pop("labels") for feature in features] if "labels" in features[0] else None
-        
-        batch = self.tokenizer.pad(features, padding=self.padding, return_tensors="pt")
-        
-        if labels is not None:
-            if isinstance(labels[0], torch.Tensor):
-                if labels[0].dim() == 0:
-                    batch["labels"] = torch.stack(labels)
-                else:
-                    batch["labels"] = torch.stack(labels).float()
-            elif isinstance(labels[0], list):
-                # Multi-label case
-                batch["labels"] = torch.tensor(labels, dtype=torch.float)
-            else:
-                # Single-label case (scalar integers)
-                batch["labels"] = torch.tensor(labels, dtype=torch.long)  # ← LONG, not float!
-        
-        return batch
+data_collator = get_data_collator(tokenizer, is_multilabel, MODEL_CONFIG.get("max_length", 128))
+compute_metrics_fn = make_compute_metrics(is_multilabel)
 
-
-
-# ============================================================
-# 6. METRICS (ADAPTIVE FOR MULTI-LABEL)
-# ============================================================
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    
-    if is_multilabel:
-        # Multi-label: use sigmoid + threshold
-        predictions = (torch.sigmoid(torch.tensor(logits)) > 0.5).int().numpy()
-        labels = labels.astype(int)
-        
-        accuracy = accuracy_score(labels, predictions)
-        f1 = f1_score(labels, predictions, average="weighted", zero_division=0)
-        precision = precision_score(labels, predictions, average="weighted", zero_division=0)
-        recall = recall_score(labels, predictions, average="weighted", zero_division=0)
-        f1_micro = f1_score(labels, predictions, average="micro", zero_division=0)
-        
-    else:
-        # Single-label: use argmax
-        predictions = np.argmax(logits, axis=-1)
-        
-        accuracy = accuracy_score(labels, predictions)
-        f1 = f1_score(labels, predictions, average="weighted", zero_division=0)
-        precision = precision_score(labels, predictions, average="weighted", zero_division=0)
-        recall = recall_score(labels, predictions, average="weighted", zero_division=0)
-        f1_micro = f1
-    
-    return {
-        "accuracy": accuracy,
-        "f1_weighted": f1,
-        "f1_micro": f1_micro,
-        "precision_weighted": precision,
-        "recall_weighted": recall
-    }
-
-
-# ============================================================
-# 7. MODEL INITIALIZATION (ADAPTIVE)
-# ============================================================
 def model_init(trial=None):
-    if is_multilabel:
-        model = AutoModelForSequenceClassification.from_pretrained(
-            "distilbert-base-uncased",
-            num_labels=num_labels,
-            problem_type="multi_label_classification"
-        )
-    else:
-        model = AutoModelForSequenceClassification.from_pretrained(
-            "distilbert-base-uncased",
-            num_labels=num_labels
-        )
-    
-    model.config.id2label = {id: label for id, label in enumerate(label_names)}
-    model.config.label2id = {label: id for id, label in enumerate(label_names)}
-    return model
+    return get_model(
+        model_name=MODEL_CONFIG["name"],
+        num_labels=num_labels,
+        is_multilabel=is_multilabel,
+        label_names=label_names,
+    )
 
 
 # ============================================================
@@ -229,18 +157,7 @@ if not hp_loaded:
 
 
 # ============================================================
-# 9. DATA COLLATOR SETUP
-# ============================================================
-if is_multilabel:
-    data_collator = MultiLabelDataCollator(tokenizer=tokenizer)
-    print("✓ Using MultiLabelDataCollator")
-else:
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    print("✓ Using standard DataCollatorWithPadding")
-
-
-# ============================================================
-# 10. TRAINING ARGUMENTS
+# 4. LOAD BEST HYPERPARAMETERS
 # ============================================================
 weight_decay = TRAIN_CONFIG.get('weight_decay', 0.01)
 seed = TRAIN_CONFIG.get('seed', 42)
@@ -286,7 +203,7 @@ for fold, (train_index, val_index) in enumerate(kf.split(indices)):
         eval_dataset=val_fold_dataset,
         processing_class=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
+        compute_metrics=compute_metrics_fn,
     )
     
     trainer.train()
@@ -375,7 +292,7 @@ final_model_trainer = Trainer(
     eval_dataset=tokenized_val_dataset,
     processing_class=tokenizer,
     data_collator=data_collator,
-    compute_metrics=compute_metrics,
+    compute_metrics=compute_metrics_fn,
 )
 
 final_model_trainer.train()
@@ -397,7 +314,7 @@ else:
     predicted_labels = np.argmax(logits, axis=-1)
 
 print("\nTest Set Metrics:")
-final_metrics = compute_metrics((logits, true_labels))
+final_metrics = compute_metrics_fn((logits, true_labels))
 for key, value in final_metrics.items():
     print(f"  {key}: {value:.4f}")
 
@@ -408,155 +325,13 @@ with open(test_metrics_path, 'w') as f:
 print(f"✓ Test metrics saved to: {test_metrics_path}")
 
 
-# Classification report (only for single-label)
-if not is_multilabel:
-    print("\n--- Classification Report ---")
-    report = classification_report(true_labels, predicted_labels, target_names=label_names, digits=4)
-    print(report)
-    
-    # Confusion matrix
-    print("\n--- Generating Normalized Confusion Matrix ---")
-    cm = confusion_matrix(true_labels, predicted_labels, labels=list(range(num_labels)))
-    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-    cm_normalized = np.nan_to_num(cm_normalized, nan=0.0)
-    
-    if num_labels <= 15:
-        plt.figure(figsize=(12, 10))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm_normalized, display_labels=label_names)
-        disp.plot(cmap="Blues", xticks_rotation='vertical', values_format=".2f")
-        plt.title(f'Normalized Confusion Matrix - K-Fold Final Model')
-        plt.xlabel('Predicted Label')
-        plt.ylabel('True Label')
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIR, "confusion_matrix_normalized.png"))
-        plt.close()
-        print(f"✓ Confusion matrix saved")
-else:
-    print("\n(Multi-label dataset: confusion matrix not applicable)")
-
-
 # ============================================================
-# 15. EMBEDDING VISUALIZATION
+# 15. EMBEDDING VISUALIZATION (centralised)
 # ============================================================
-print("\n--- Embedding Visualization (PCA & t-SNE) ---")
-
-sample_size = 2000
-if len(tokenized_test_dataset) > sample_size:
-    sample_indices = np.random.choice(len(tokenized_test_dataset), sample_size, replace=False)
-    sampled_dataset = tokenized_test_dataset.select(sample_indices)
-else:
-    sampled_dataset = tokenized_test_dataset
-
-print(f"Using {len(sampled_dataset)} examples for embedding visualization")
-
-# Use appropriate collator
-if is_multilabel:
-    embedding_collator = MultiLabelDataCollator(tokenizer=tokenizer)
-else:
-    embedding_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-sampled_dataloader = DataLoader(
-    sampled_dataset,
-    batch_size=32,
-    collate_fn=embedding_collator,
-    shuffle=False
+visualize_embeddings(
+    final_model_trainer.model, tokenized_test_dataset,
+    tokenizer, label_names, OUTPUT_DIR,
 )
-
-model = final_model_trainer.model
-model.eval()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-
-all_embeddings = []
-all_labels_list = []
-
-with torch.no_grad():
-    for batch in sampled_dataloader:
-        batch_labels = batch.pop('labels')
-        batch = {k: v.to(device) for k, v in batch.items()}
-        outputs = model(
-            input_ids=batch['input_ids'],
-            attention_mask=batch['attention_mask'],
-            output_hidden_states=True
-        )
-        sequence_output = outputs.hidden_states[-1][:, 0, :]
-        all_embeddings.append(sequence_output.cpu().numpy())
-        all_labels_list.append(batch_labels.cpu().numpy())
-
-embeddings_array = np.vstack(all_embeddings)
-labels_array = np.vstack(all_labels_list)
-
-print(f"Embeddings shape: {embeddings_array.shape}")
-print(f"Labels shape: {labels_array.shape}")
-
-# PCA
-print("Running PCA...")
-pca = PCA(n_components=2, random_state=42)
-embeddings_pca = pca.fit_transform(embeddings_array)
-
-# t-SNE
-print("Running t-SNE (this may take a few minutes)...")
-tsne = TSNE(n_components=2, random_state=42, perplexity=30, max_iter=1000, learning_rate='auto')
-embeddings_tsne = tsne.fit_transform(embeddings_array)
-
-# Prepare visualization DataFrames
-df_pca = pd.DataFrame(embeddings_pca, columns=['Dim1', 'Dim2'])
-df_tsne = pd.DataFrame(embeddings_tsne, columns=['Dim1', 'Dim2'])
-
-if is_multilabel:
-    # Get primary emotion (first label with value 1)
-    primary_emotions = []
-    for label_vec in labels_array:
-        label_idx = np.where(label_vec == 1)[0]
-        if len(label_idx) > 0:
-            primary_emotions.append(label_names[label_idx[0]])
-        else:
-            primary_emotions.append('unknown')
-    df_pca['Emotion'] = primary_emotions
-    df_tsne['Emotion'] = primary_emotions
-else:
-    df_pca['Emotion'] = [label_names[int(label)] for label in labels_array]
-    df_tsne['Emotion'] = [label_names[int(label)] for label in labels_array]
-
-# Plot PCA
-plt.figure(figsize=(12, 10))
-sns.scatterplot(
-    x='Dim1', y='Dim2',
-    hue='Emotion',
-    palette='viridis',
-    data=df_pca,
-    legend='brief',
-    alpha=0.7,
-    s=20
-)
-plt.title(f'PCA of DistilBERT Embeddings - {DATASET_CONFIG["name"]}')
-plt.xlabel('PC1')
-plt.ylabel('PC2')
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT_DIR, "embeddings_pca_visualization.png"), dpi=100)
-plt.close()
-print("✓ PCA visualization saved")
-
-# Plot t-SNE
-plt.figure(figsize=(12, 10))
-sns.scatterplot(
-    x='Dim1', y='Dim2',
-    hue='Emotion',
-    palette='viridis',
-    data=df_tsne,
-    legend='brief',
-    alpha=0.7,
-    s=20
-)
-plt.title(f't-SNE of DistilBERT Embeddings - {DATASET_CONFIG["name"]}')
-plt.xlabel('t-SNE 1')
-plt.ylabel('t-SNE 2')
-plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
-plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT_DIR, "embeddings_tsne_visualization.png"), dpi=100)
-plt.close()
-print("✓ t-SNE visualization saved")
 
 
 # ============================================================

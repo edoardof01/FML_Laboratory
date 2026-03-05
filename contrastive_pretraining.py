@@ -9,7 +9,8 @@ from transformers import AutoTokenizer, AutoModel, get_linear_schedule_with_warm
 from src.data_utils import load_and_preprocess_dataset, tokenize_dataset
 from src.config_utils import get_config
 from src.losses import SupConLoss
-from src.train_utils import set_seed, MultiLabelDataCollator
+from src.metrics import make_compute_metrics
+from src.train_utils import set_seed
 from tqdm import tqdm
 
 # ============================================================
@@ -182,13 +183,13 @@ print(f"\n✓ Saved SupCon encoder to {save_path}")
 # ============================================================
 print("\n--- Phase 2: Fine-tuning SupCon encoder for classification ---")
 
-from transformers import AutoModelForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding
-from src.metrics import compute_metrics
-from src.train_utils import MultiLabelDataCollator
-import json
+from src.train_utils import (
+    get_data_collator,
+    build_training_args,
+    evaluate_and_save,
+)
 
 # Tokenize datasets for classification
-from src.data_utils import tokenize_dataset
 tokenized_datasets, _ = tokenize_dataset(
     dataset,
     text_column=DATASET_CONFIG["text_column"],
@@ -201,15 +202,11 @@ num_labels = label_info["num_labels"]
 is_multilabel = label_info["is_multilabel"]
 label_names = label_info["label_names"]
 
-if is_multilabel:
-    problem_type = "multi_label_classification"
-    data_collator = MultiLabelDataCollator(tokenizer=tokenizer, max_length=config["model"].get("max_length", 128))
-else:
-    problem_type = "single_label_classification"
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+problem_type = "multi_label_classification" if is_multilabel else "single_label_classification"
+data_collator = get_data_collator(tokenizer, is_multilabel, config["model"].get("max_length", 128))
+compute_metrics_fn = make_compute_metrics(is_multilabel)
 
-def compute_metrics_wrapper(eval_pred):
-    return compute_metrics(eval_pred, is_multilabel=is_multilabel)
+from transformers import AutoModelForSequenceClassification, Trainer
 
 # Load SupCon pretrained encoder for classification
 model_for_finetune = AutoModelForSequenceClassification.from_pretrained(
@@ -220,21 +217,10 @@ model_for_finetune = AutoModelForSequenceClassification.from_pretrained(
 model_for_finetune.config.id2label = {i: name for i, name in enumerate(label_names)}
 model_for_finetune.config.label2id = {name: i for i, name in enumerate(label_names)}
 
-training_args = TrainingArguments(
+training_args = build_training_args(
     output_dir=os.path.join(OUTPUT_DIR, "finetuning_results"),
-    learning_rate=float(config["training"]["learning_rate"]),
-    per_device_train_batch_size=config["training"]["per_device_train_batch_size"],
-    per_device_eval_batch_size=config["training"]["per_device_eval_batch_size"],
-    num_train_epochs=config["training"]["num_train_epochs"],
-    weight_decay=config["training"]["weight_decay"],
-    eval_strategy="epoch",
-    save_strategy="epoch",
-    load_best_model_at_end=True,
-    metric_for_best_model="f1_weighted",
+    train_config=config["training"],
     logging_dir=os.path.join(OUTPUT_DIR, "logs"),
-    logging_steps=100,
-    report_to="tensorboard",
-    seed=config["training"].get("seed", 42)
 )
 
 trainer = Trainer(
@@ -244,7 +230,7 @@ trainer = Trainer(
     eval_dataset=tokenized_datasets["validation"],
     tokenizer=tokenizer,
     data_collator=data_collator,
-    compute_metrics=compute_metrics_wrapper,
+    compute_metrics=compute_metrics_fn,
 )
 
 trainer.train()
@@ -253,20 +239,10 @@ print("✓ Fine-tuning complete")
 # ============================================================
 # 8. EVALUATION & SAVE
 # ============================================================
-print("\n--- Final Evaluation on Test Set ---")
-predictions_output = trainer.predict(tokenized_datasets["test"])
-print("\nTest Set Metrics:", predictions_output.metrics)
+evaluate_and_save(
+    trainer, tokenized_datasets["test"], tokenizer, OUTPUT_DIR,
+    label_names=label_names, is_multilabel=is_multilabel,
+)
 
-# Save test metrics
-test_metrics_path = os.path.join(OUTPUT_DIR, "test_metrics.json")
-with open(test_metrics_path, 'w') as f:
-    json.dump(predictions_output.metrics, f, indent=4)
-print(f"✓ Test metrics saved to: {test_metrics_path}")
-
-# Save final model
-final_model_dir = os.path.join(OUTPUT_DIR, "final_model")
-os.makedirs(final_model_dir, exist_ok=True)
-trainer.save_model(final_model_dir)
-tokenizer.save_pretrained(final_model_dir)
-print(f"✓ Final SupCon-pretrained model saved to: {final_model_dir}")
+print(f"\n{'='*60}\nSUPCON PRETRAINING + FINE-TUNING COMPLETE\n{'='*60}")
 

@@ -1,22 +1,30 @@
 # weighted_emotions.py
+"""
+Weighted Loss Fine-Tuning
+=========================
+Uses BCEWithLogitsLoss with per-class pos_weight to handle class imbalance.
+Includes Optuna search over the softening exponent.
+"""
 import os
 import json
 import torch
-import optuna
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import pandas as pd
-from transformers import (
-    AutoModelForSequenceClassification,
-    TrainingArguments,
-    IntervalStrategy
-)
-from src.data_utils import load_and_preprocess_dataset, tokenize_dataset
-from src.metrics import compute_metrics
-from src.train_utils import MultiLabelDataCollator, WeightedTrainer, set_seed
-from src.viz_utils import visualize_embeddings, plot_label_distribution
+import optuna
+
+from transformers import TrainingArguments
+
 from src.config_utils import get_config
+from src.data_utils import load_and_preprocess_dataset, tokenize_dataset
+from src.metrics import make_compute_metrics
+from src.model_utils import get_model
+from src.train_utils import (
+    MultiLabelDataCollator,
+    WeightedTrainer,
+    build_training_args,
+    evaluate_and_save,
+    set_seed,
+)
+from src.viz_utils import visualize_embeddings, plot_label_distribution
 
 # ============================================================
 # 1. SETUP & CONFIGURATION
@@ -116,23 +124,18 @@ with open(os.path.join(OUTPUT_DIR, "label_counts.json"), "w") as f:
 print("Label counts saved and raw pos_weight computed.")
 plot_label_distribution(label_counts_dict, OUTPUT_DIR)
 
-
-from src.model_utils import get_model
-
 # ============================================================
-# 5. MODEL INIT
+# 5. MODEL INIT & METRICS
 # ============================================================
 def model_init(trial=None):
     return get_model(
         model_name=MODEL_CONFIG["name"],
         num_labels=num_labels,
         is_multilabel=is_multilabel,
-        label_names=label_names
+        label_names=label_names,
     )
 
-# wrapper for metrics
-def compute_metrics_wrapper(eval_pred):
-    return compute_metrics(eval_pred, is_multilabel=is_multilabel)
+compute_metrics_fn = make_compute_metrics(is_multilabel)
 
 # ============================================================
 # 6. OPTUNA
@@ -172,7 +175,7 @@ def optuna_objective(trial):
         eval_dataset=tokenized_val,
         tokenizer=tokenizer,
         data_collator=MultiLabelDataCollator(tokenizer=tokenizer, max_length=MODEL_CONFIG.get("max_length", 128)),
-        compute_metrics=compute_metrics_wrapper,
+        compute_metrics=compute_metrics_fn,
         pos_weight=trial_pos_weight,
     )
 
@@ -247,7 +250,7 @@ trainer = WeightedTrainer(
     eval_dataset=tokenized_val,
     tokenizer=tokenizer,
     data_collator=MultiLabelDataCollator(tokenizer=tokenizer, max_length=MODEL_CONFIG.get("max_length", 128)),
-    compute_metrics=compute_metrics_wrapper,
+    compute_metrics=compute_metrics_fn,
     pos_weight=pos_weight,
 )
 
